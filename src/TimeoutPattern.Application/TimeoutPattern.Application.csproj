@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\TimeoutPattern.Core\TimeoutPattern.Core.csproj" />
+  </ItemGroup>
+
+</Project>
