@@ -1,48 +1,48 @@
-# TimeoutPattern — Timeouts granulares en .NET 8 Web API
+# TimeoutPattern — Granular timeouts in a .NET 8 Web API
 
-Un timeout no es un número: es un **presupuesto de tiempo** que se reparte.
-El cliente dispone de un tiempo total, la petición recibe una parte, cada dependencia recibe una
-parte de lo que queda y el servicio de abajo sabe cuánto le queda a quien lo llamó.
-Este proyecto implementa esa idea con `CancellationTokenSource`, `TimeProvider` y un poco de estadística.
+A timeout is not a number: it is a **time budget** that gets divided up.
+The client has a total amount of time, the request gets a share of it, each dependency gets a
+share of what is left, and the downstream service knows how much time its caller has left.
+This project implements that idea with `CancellationTokenSource`, `TimeProvider` and a bit of statistics.
 
 ```
-Cliente ──X-Request-Timeout-Ms: 2000──▶ products.read (2500 ms por política → 2000 ms porque el cliente lo pidió)
-                                         ├─ catalog.read        min(500, restante)
-                                         ├─ pricing.quote       min(1200, restante − 50 reserva)
-                                         │    └─ pricing.tax    min(300, restante de pricing.quote) · Pessimistic
-                                         └─ inventory.lookup    min(800, restante − 100 reserva)  · opcional → degrada
+Client ──X-Request-Timeout-Ms: 2000──▶ products.read (2500 ms by policy → 2000 ms because the client asked for it)
+                                         ├─ catalog.read        min(500, remaining)
+                                         ├─ pricing.quote       min(1200, remaining − 50 reserve)
+                                         │    └─ pricing.tax    min(300, remaining of pricing.quote) · Pessimistic
+                                         └─ inventory.lookup    min(800, remaining − 100 reserve)  · optional → degrades
                                               └─ HTTP ──X-Request-Timeout-Ms: 785──▶ warehouse.stock
 ```
 
-## Ideas clave
+## Key ideas
 
-| Concepto | Qué resuelve | Dónde |
+| Concept | What it solves | Where |
 |---|---|---|
-| **Políticas jerárquicas por clave** | `pricing.tax` hereda **campo por campo** de `pricing` → configuras solo lo que cambia | `TimeoutPolicyResolver` |
-| **Presupuestos anidados** | `efectivo = min(política, restante del padre − reserva)`; un hijo nunca vive más que su padre | `TimeoutPlanner`, `TimeoutBudget` |
-| **Reserva** | Guarda tiempo para lo que viene después (p. ej. serializar la respuesta) | `Operations:*:Reserve` |
-| **Mínimo viable** | No arranca trabajo que no puede terminar (`BudgetExhaustedException`) | `MinimumViableBudget` |
-| **Cooperative vs Pessimistic** | Pessimistic deja de esperar a un SDK que ignora el token (`Task.WaitAsync`) | `TimeoutExecutor.Supervise` |
-| **Propagación de deadline** | Al estilo gRPC: el servicio de abajo se rinde antes que quien lo llama | `DeadlinePropagationHandler` |
-| **Deadline entrante** | El cliente puede **acortar** el deadline, nunca alargarlo | `ResolveRequest` |
-| **Timeout ≠ cancelación** | `DeadlineException : TimeoutException` → 504; la cancelación del llamador → `OperationCanceledException`; si el cliente se desconecta → 499 | `TimeoutExecutor`, `DeadlineMiddleware` |
-| **Bucle con pronóstico** | Una EWMA (media + 2σ) predice si cabe otra iteración y devuelve un resultado parcial **a tiempo** | `SalesReportService`, `EwmaDurationEstimator` |
-| **Observabilidad** | `Server-Timing` (visible en DevTools), ProblemDetails explicativos, métricas `timeout_pattern.*` | `TimeoutTelemetry` |
-| **Hot reload** | `IOptionsMonitor`: cambias `appsettings.json` y se aplica sin reiniciar; la configuración se valida al arrancar | `TimeoutOptionsValidator` |
+| **Hierarchical policies by key** | `pricing.tax` inherits from `pricing` **field by field** → you configure only what changes | `TimeoutPolicyResolver` |
+| **Nested budgets** | `effective = min(policy, parent remaining − reserve)`; a child never outlives its parent | `TimeoutPlanner`, `TimeoutBudget` |
+| **Reserve** | Saves time for what comes next (e.g. serializing the response) | `Operations:*:Reserve` |
+| **Minimum viable budget** | Does not start work it cannot finish (`BudgetExhaustedException`) | `MinimumViableBudget` |
+| **Cooperative vs Pessimistic** | Pessimistic stops waiting for an SDK that ignores the token (`Task.WaitAsync`) | `TimeoutExecutor.Supervise` |
+| **Deadline propagation** | gRPC style: the downstream service gives up before its caller does | `DeadlinePropagationHandler` |
+| **Inbound deadline** | The client can **shorten** the deadline, never extend it | `ResolveRequest` |
+| **Timeout ≠ cancellation** | `DeadlineException : TimeoutException` → 504; caller cancellation → `OperationCanceledException`; client disconnect → 499 | `TimeoutExecutor`, `DeadlineMiddleware` |
+| **Forecasting loop** | An EWMA (mean + 2σ) predicts whether another iteration fits and returns a partial result **on time** | `SalesReportService`, `EwmaDurationEstimator` |
+| **Observability** | `Server-Timing` (visible in DevTools), explanatory ProblemDetails, `timeout_pattern.*` metrics | `TimeoutTelemetry` |
+| **Hot reload** | `IOptionsMonitor`: change `appsettings.json` and it applies without a restart; configuration is validated at startup | `TimeoutOptionsValidator` |
 
-## Estructura
+## Structure
 
 ```
 src/
-  TimeoutPattern.Core            Motor de timeouts (sin dependencia de ASP.NET)
-  TimeoutPattern.Application     Casos de uso: página de producto, reporte de ventas
-  TimeoutPattern.Infrastructure  Dependencias simuladas, gateway HTTP, propagación de deadline
-  TimeoutPattern.Api             Middleware de deadline, atributo [TimeoutPolicy], 504 ProblemDetails
+  TimeoutPattern.Core            Timeout engine (no ASP.NET dependency)
+  TimeoutPattern.Application     Use cases: product page, sales report
+  TimeoutPattern.Infrastructure  Simulated dependencies, HTTP gateway, deadline propagation
+  TimeoutPattern.Api             Deadline middleware, [TimeoutPolicy] attribute, 504 ProblemDetails
 tests/
-  TimeoutPattern.Tests           Unitarios con FakeTimeProvider (deterministas) + integración por HTTP
+  TimeoutPattern.Tests           Unit tests with FakeTimeProvider (deterministic) + HTTP integration tests
 ```
 
-## Configuración
+## Configuration
 
 ```jsonc
 "Timeouts": {
@@ -53,41 +53,41 @@ tests/
   "Requests": {
     "products":      { "Timeout": "00:00:02.500" },
     "reports":       { "Timeout": "00:00:08", "HonorInboundDeadline": false },
-    "reports.sales": { "Timeout": "00:00:03" }          // hereda HonorInboundDeadline=false de "reports"
+    "reports.sales": { "Timeout": "00:00:03" }          // inherits HonorInboundDeadline=false from "reports"
   },
   "Operations": {
     "pricing":     { "Timeout": "00:00:01.200", "Reserve": "00:00:00.050" },
-    "pricing.tax": { "Timeout": "00:00:00.300", "Strategy": "Pessimistic" }   // hereda Reserve de "pricing"
+    "pricing.tax": { "Timeout": "00:00:00.300", "Strategy": "Pessimistic" }   // inherits Reserve from "pricing"
   }
 }
 ```
 
-## Uso
+## Usage
 
 ```csharp
-[TimeoutPolicy("products.read")]                 // deadline de la petición
+[TimeoutPolicy("products.read")]                 // request deadline
 public sealed class ProductsController(ProductPageService pages) : ControllerBase { ... }
 
-var product = await executor.ExecuteAsync(       // timeout de la operación, anidado en la petición
+var product = await executor.ExecuteAsync(       // operation timeout, nested inside the request
     Operations.CatalogRead,
     token => catalog.FindAsync(sku, token),
     cancellationToken);
 ```
 
-`HttpContext.RequestAborted` se reemplaza por un token que se dispara por **desconexión o deadline**, así que
-cualquier código que ya pase el `CancellationToken` del request respeta el deadline sin cambios.
+`HttpContext.RequestAborted` is replaced by a token that fires on **disconnect or deadline**, so
+any code that already passes the request's `CancellationToken` honors the deadline without changes.
 
-## Probarlo
+## Try it
 
 ```bash
 dotnet test                                     # 29 tests
 dotnet run --project src/TimeoutPattern.Api     # http://localhost:5080/swagger
 ```
 
-Abre `src/TimeoutPattern.Api/TimeoutPattern.Api.http` y ejecuta los escenarios. El header
-`X-Simulate-Latency: inventory=3000, tax=2000` hace lenta cualquier dependencia solo para esa petición.
+Open `src/TimeoutPattern.Api/TimeoutPattern.Api.http` and run the scenarios. The header
+`X-Simulate-Latency: inventory=3000, tax=2000` makes any dependency slow for that request only.
 
-Ejemplo de 504:
+Example 504:
 
 ```json
 {
@@ -102,18 +102,18 @@ Ejemplo de 504:
 }
 ```
 
-## Ajustar los timeouts con datos
+## Tuning timeouts with data
 
-El histograma `timeout_pattern.budget.utilization` mide `transcurrido ÷ permitido` por operación:
+The `timeout_pattern.budget.utilization` histogram measures `elapsed ÷ allowed` per operation:
 
-- p99 cercano a **1.0** → el timeout está cortando trabajo real: súbelo o arregla la dependencia.
-- p99 muy por debajo de 1.0 → hay margen: bájalo y falla más rápido.
+- p99 close to **1.0** → the timeout is cutting off real work: raise it or fix the dependency.
+- p99 well below 1.0 → there is headroom: lower it and fail faster.
 
-## Decisiones de diseño
+## Design decisions
 
-- **Por qué no `[RequestTimeout]` de ASP.NET Core 8**: cubre la petición, pero no reparte el presupuesto
-  entre operaciones anidadas ni propaga el deadline hacia otros servicios.
-- **`HttpClient.Timeout = Infinite`**: el executor es quien decide el timeout de la llamada; los 100 s por defecto nunca se alcanzarían primero.
-- **Los timeouts no se registran como Error**: el middleware los responde directamente con un 504.
-  Si se relanzaran, el `ExceptionHandlerMiddleware` de .NET 8 escribiría cada uno como error con su stack trace.
-- **`TimeProvider` en todas partes**: los tests unitarios avanzan el reloj en lugar de dormir.
+- **Why not ASP.NET Core 8's `[RequestTimeout]`**: it covers the request, but it does not split the budget
+  across nested operations or propagate the deadline to other services.
+- **`HttpClient.Timeout = Infinite`**: the executor decides the call's timeout; the default 100 s would never be reached first.
+- **Timeouts are not logged as errors**: the middleware answers them directly with a 504.
+  If they were rethrown, .NET 8's `ExceptionHandlerMiddleware` would log each one as an error with its stack trace.
+- **`TimeProvider` everywhere**: unit tests advance the clock instead of sleeping.
